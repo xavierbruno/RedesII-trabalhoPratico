@@ -1,70 +1,58 @@
 import socket
 import threading
 
-# Tabela dinâmica de clientes
-clients = {}
+class ServidorCentral:
+    def __init__(self, host='127.0.0.1', port=5000):
+        self.host = host
+        self.port = port
+        self.nos_registrados = {}
+        self.lock = threading.Lock()
 
-def handle_client(conn, addr):
-    global clients
-    print(f"Nova conexão: {addr}")
-    
-    while True:
-        try:
-            data = conn.recv(1024).decode()
-            if not data:
-                break
-            
-            print(f"Mensagem recebida de {addr}: {data}")
-            command = data.split(" ", 1)[0].upper()
-            
-            if command == "REGISTER":
-                _, client_data = data.split(" ", 1)
-                ip_port, files = client_data.split(" ", 1)
-                if ip_port in clients:
-                    conn.send("Cliente já registrado.\n".encode())
-                else:
-                    clients[ip_port] = files.split(",")
-                    conn.send("Registro realizado com sucesso.\n".encode())
-                    print(f"Cliente registrado: {ip_port} com arquivos {clients[ip_port]}")
+    def iniciar(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+            server_socket.bind((self.host, self.port))
+            server_socket.listen()
+            print(f"Servidor central iniciado em {self.host}:{self.port}")
 
-            elif command == "LIST":
-                client_list = "\n".join(
-                    [f"{ip}: {', '.join(files)}" for ip, files in clients.items()]
-                )
-                conn.send(f"Nós conectados:\n{client_list}\n".encode())
-            
-            elif command == "UNREGISTER":
-                ip_port = data.split(" ", 1)[1]
-                if ip_port in clients:
-                    del clients[ip_port]
-                    conn.send("Registro removido com sucesso.\n".encode())
-                    print(f"Cliente removido: {ip_port}")
-                else:
-                    conn.send("Cliente não encontrado.\n".encode())
-            
-            elif command == "QUIT":
-                conn.send("Conexão encerrada.\n".encode())
-                break
+            while True:
+                conn, addr = server_socket.accept()
+                threading.Thread(target=self.tratar_cliente, args=(conn, addr)).start()
 
+    def tratar_cliente(self, conn, addr):
+        with conn:
+            while True:
+                dados = conn.recv(1024).decode()
+                if not dados:
+                    break
+                comandos = dados.split('|')
+                if comandos[0] == 'REGISTRAR':
+                    self.registrar_cliente(conn, comandos[1], comandos[2])
+                elif comandos[0] == 'CONSULTAR':
+                    self.enviar_lista_nos(conn)
+                elif comandos[0] == 'ENCERRAR':
+                    self.remover_cliente(conn, comandos[1])
+
+    def registrar_cliente(self, conn, endereco, arquivos):
+        with self.lock:
+            if endereco in self.nos_registrados:
+                conn.sendall(b'CLIENTE_JA_REGISTRADO')
             else:
-                conn.send("Comando inválido.\n".encode())
+                self.nos_registrados[endereco] = arquivos.split(',')
+                conn.sendall(b'REGISTRO_SUCESSO')
+                print(f"Cliente registrado: {endereco} com arquivos: {arquivos}")
 
-        except Exception as e:
-            print(f"Erro no cliente {addr}: {e}")
-            break
+    def enviar_lista_nos(self, conn):
+        with self.lock:
+            lista_nos = '|'.join([f"{k}:{','.join(v)}" for k, v in self.nos_registrados.items()])
+            conn.sendall(lista_nos.encode())
 
-    conn.close()
-    print(f"Conexão encerrada com {addr}")
+    def remover_cliente(self, conn, endereco):
+        with self.lock:
+            if endereco in self.nos_registrados:
+                del self.nos_registrados[endereco]
+                conn.sendall(b'CLIENTE_REMOVIDO')
+                print(f"Cliente removido: {endereco}")
 
-def main():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(("0.0.0.0", 5000))
-    server.listen(5)
-    print("Servidor iniciado na porta 5000.")
-
-    while True:
-        conn, addr = server.accept()
-        threading.Thread(target=handle_client, args=(conn, addr)).start()
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    servidor = ServidorCentral()
+    servidor.iniciar()
