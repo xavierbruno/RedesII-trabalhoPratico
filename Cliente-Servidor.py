@@ -2,99 +2,131 @@ import socket
 import threading
 import os
 
-# Configuração do nó
-SERVER_IP = "192.168.15.106"
-SERVER_PORT = 5000
-PEER_PORT = 5001  # Porta local para conexões P2P
-FILES = ["song1.mp3", "song3.mp3"]  # Arquivos compartilhados pelo nó
+class NoP2P:
+    def __init__(self, host='127.0.0.1', porta_tcp=5001, porta_udp=6001):
+        self.host = host
+        self.porta_tcp = porta_tcp
+        self.porta_udp = porta_udp
+        self.arquivos = ["song1.mp3", "song3.mp3"]
+        self.servidor_central = ('127.0.0.1', 5000)
 
-# Função para registrar o nó no servidor central
-def register_with_server():
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.connect((SERVER_IP, SERVER_PORT))
-    register_message = f"REGISTER 192.168.15.106:{PEER_PORT} {','.join(FILES)}"
-    client.send(register_message.encode())
-    response = client.recv(1024).decode()
-    print(f"Resposta do servidor: {response}")
-    client.close()
+    def iniciar(self):
+        threading.Thread(target=self.iniciar_servidor).start()
+        self.menu_cliente()
 
-# Função para consultar arquivos no servidor central
-def list_files_on_server():
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.connect((SERVER_IP, SERVER_PORT))
-    client.send("LIST".encode())
-    response = client.recv(1024).decode()
-    print(f"Lista de nós e arquivos:\n{response}")
-    client.close()
+    def iniciar_servidor(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
+            udp_socket.bind((self.host, self.porta_udp))
+            print(f"Servidor P2P iniciado em {self.host}:{self.porta_udp} para streaming UDP")
 
-# Função para requisitar um arquivo de outro nó (P2P)
-def request_file_from_peer(peer_ip, peer_port, filename):
-    peer_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    peer_client.connect((peer_ip, int(peer_port)))
-    peer_client.send(f"REQUEST {filename}".encode())
-    with open(f"downloads/{filename}", "wb") as f:
+            while True:
+                dados, addr = udp_socket.recvfrom(1024)
+                requisicao = dados.decode().split('|')
+                if requisicao[0] == 'REQUISITAR':
+                    arquivo = requisicao[1]
+                    self.enviar_arquivo_udp(udp_socket, addr, arquivo)
+
+    def enviar_arquivo_udp(self, endereco_cliente, arquivo):
+        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        try:
+            if not os.path.exists(arquivo):
+                # Enviar mensagem de erro se o arquivo não existir
+                mensagem = "ERRO: Arquivo não encontrado."
+                udp_socket.sendto(mensagem.encode(), endereco_cliente)
+                print(f"Arquivo {arquivo} não encontrado. Notificando cliente.")
+                return
+
+            print(f"Iniciando envio do arquivo {arquivo} para {endereco_cliente}")
+            with open(arquivo, "rb") as f:
+                while True:
+                    dados = f.read(1024)
+                    if not dados:
+                        udp_socket.sendto(b'END', endereco_cliente)  # Fim da transferência
+                        print("Envio concluído!")
+                        break
+                    udp_socket.sendto(dados, endereco_cliente)
+        except Exception as e:
+            print(f"[Erro] Falha ao enviar arquivo: {e}")
+        finally:
+            udp_socket.close()
+
+    def menu_cliente(self):
         while True:
-            data = peer_client.recv(1024)
-            if not data:
+            print("\n1 - Registrar Cliente")
+            print("2 - Consultar Lista de Nós e Arquivos")
+            print("3 - Requisitar Arquivo")
+            print("4 - Encerrar Conexão")
+            opcao = input("Escolha uma opção: ")
+
+            if opcao == '1':
+                self.registrar_cliente()
+            elif opcao == '2':
+                self.consultar_lista_nos()
+            elif opcao == '3':
+                self.requisitar_arquivo()
+            elif opcao == '4':
+                self.encerrar_conexao()
                 break
-            f.write(data)
-    print(f"Arquivo {filename} baixado com sucesso!")
-    peer_client.close()
 
-# Função para lidar com conexões P2P (atuando como servidor P2P)
-def handle_peer_connection(conn, addr):
-    request = conn.recv(1024).decode()
-    command, filename = request.split(" ", 1)
-    if command == "REQUEST" and filename in FILES:
-        print(f"Enviando arquivo {filename} para {addr}")
-        with open(filename, "rb") as f:
-            data = f.read(1024)
-            while data:
-                conn.send(data)
-                data = f.read(1024)
-        print(f"Arquivo {filename} enviado com sucesso.")
-    conn.close()
+    def registrar_cliente(self):
+        self.arquivos = input("Digite os arquivos disponíveis separados por vírgula: ").split(',')
+        endereco = f"{self.host}:{self.porta_tcp}"
+        mensagem = f"REGISTRAR|{endereco}|{','.join(self.arquivos)}"
+        self.enviar_para_servidor(mensagem)
 
-# Função principal para inicializar o nó
-def main():
-    # Registrar no servidor central
-    register_with_server()
+    def consultar_lista_nos(self):
+        mensagem = "CONSULTAR"
+        resposta = self.enviar_para_servidor(mensagem)
+        print("\nNós e arquivos disponíveis:")
+        print(resposta)
 
-    # Criar um servidor para conexões P2P
-    peer_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    peer_server.bind(("0.0.0.0", PEER_PORT))
-    peer_server.listen(5)
-    print(f"Servidor P2P rodando na porta {PEER_PORT}")
+    def requisitar_arquivo(self):
+        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # Indentado corretamente
+        udp_socket.settimeout(5)  # Timeout para evitar travamento
 
-    # Interface para o usuário
-    threading.Thread(target=lambda: peer_server_loop(peer_server)).start()
-    while True:
-        print("\nEscolha uma opção:")
-        print("1 - Consultar lista de nós e arquivos")
-        print("2 - Requisitar arquivo de outro nó")
-        print("3 - Sair")
-        option = input("Opção: ")
-        
-        if option == "1":
-            list_files_on_server()
-        elif option == "2":
-            peer_ip = input("IP do nó: ")
-            peer_port = input("Porta do nó: ")
-            filename = input("Nome do arquivo: ")
-            request_file_from_peer(peer_ip, peer_port, filename)
-        elif option == "3":
-            print("Encerrando...")
-            break
-        else:
-            print("Opção inválida.")
+        ip = input("Digite o IP do nó: ")
+        porta = int(input("Digite a porta UDP do nó: "))
+        arquivo = input("Digite o nome do arquivo: ")
 
-# Loop do servidor P2P para aceitar conexões
-def peer_server_loop(peer_server):
-    while True:
-        conn, addr = peer_server.accept()
-        threading.Thread(target=handle_peer_connection, args=(conn, addr)).start()
+        try:
+            # Enviar solicitação ao servidor
+            mensagem = f"GET {arquivo}"
+            udp_socket.sendto(mensagem.encode(), (ip, porta))
+            print(f"Solicitação enviada para {ip}:{porta}")
 
-if __name__ == "__main__":
-    if not os.path.exists("downloads"):
-        os.mkdir("downloads")
-    main()
+            # Receber os dados do arquivo
+            with open(f"recebido_{arquivo}", "wb") as f:
+                while True:
+                    try:
+                        dados, _ = udp_socket.recvfrom(1024)
+                        if dados == b'END':  # Indicação de fim da transferência
+                            print("Transferência concluída!")
+                            break
+                        f.write(dados)
+                    except socket.timeout:
+                        print("Tempo limite atingido para receber dados.")
+                        break
+        except ConnectionResetError:
+            print(f"[Erro] Conexão com {ip}:{porta} foi encerrada.")
+        except Exception as e:
+            print(f"[Erro] Falha ao requisitar arqu ivo: {e}")
+        finally:
+            udp_socket.close()
+
+
+    def encerrar_conexao(self):
+        endereco = f"{self.host}:{self.porta_tcp}"
+        mensagem = f"ENCERRAR|{endereco}"
+        self.enviar_para_servidor(mensagem)
+
+    def enviar_para_servidor(self, mensagem):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp_socket:
+            tcp_socket.connect(self.servidor_central)
+            tcp_socket.sendall(mensagem.encode())
+            resposta = tcp_socket.recv(1024).decode()
+            return resposta
+
+if __name__ == '__main__':
+    no = NoP2P()
+    no.iniciar()
